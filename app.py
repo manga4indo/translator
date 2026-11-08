@@ -1,262 +1,364 @@
 
 import io
 import zipfile
-from pathlib import Path
 
 import streamlit as st
-from modules.pipeline import translate_image
+from PIL import Image
+
+from modules.pipeline import remove_text
+
+
+# --------------------------------------------------
+# KONFIGURASI HALAMAN
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="Manga Translator ID",
-    page_icon="📚",
+    page_title="Manga Text Remover",
+    page_icon="🧹",
     layout="wide"
 )
 
+
+# --------------------------------------------------
+# STYLE
+# --------------------------------------------------
+
 st.markdown("""
 <style>
-.stApp {
-    background: #0d1117;
-}
-.main .block-container {
-    max-width: 1100px;
-    padding-top: 2rem;
-}
-.hero h1 {
-    font-size: 3.4rem;
-    letter-spacing: -2px;
-}
-.hero span {
-    color: #b8f36b;
-}
-.muted {
-    color: #9aa4b2;
-}
-.stButton>button[kind="primary"] {
-    background: #b8f36b;
-    color: #10150c;
-    border: 0;
-    font-weight: 700;
-}
-div[data-testid="stFileUploader"] {
-    border: 1px dashed #64748b;
-    border-radius: 14px;
-    padding: 12px;
-}
+    .stApp {
+        background-color: #0d1117;
+    }
+
+    h1, h2, h3 {
+        color: #b8f36b;
+    }
+
+    .description {
+        color: #b9c0ce;
+        font-size: 15px;
+    }
+
+    div.stButton > button {
+        background-color: #b8f36b;
+        color: #0d1117;
+        border: none;
+        border-radius: 8px;
+        font-weight: bold;
+        min-height: 45px;
+    }
+
+    div.stButton > button:hover {
+        background-color: #a5df5d;
+        color: #0d1117;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+
+# --------------------------------------------------
+# JUDUL
+# --------------------------------------------------
+
+st.title("🧹 Manga Text Remover")
+
 st.markdown(
-    '<div class="hero">'
-    '<p class="muted">✦ AI MANGA TRANSLATION WORKSPACE</p>'
-    '<h1>Manga Translator <span>ID</span></h1>'
-    '<p class="muted">Terjemahkan manga, manhwa, dan manhua ke Bahasa Indonesia.</p>'
-    '</div>',
+    '<p class="description">'
+    'Hapus teks asing dari gambar manga dan manhwa. '
+    'Setelah dibersihkan, kamu bisa menerjemahkan dan '
+    'menambahkan tulisan Indonesia sendiri di Photoshop.'
+    '</p>',
     unsafe_allow_html=True
 )
 
-# Pengaturan sidebar
-with st.sidebar:
-    st.header("⚙️ Pengaturan")
+st.divider()
 
-    st.markdown("**Bahasa sumber**")
 
+# --------------------------------------------------
+# PENGATURAN
+# --------------------------------------------------
+
+left, right = st.columns(2)
+
+with left:
     source_language = st.selectbox(
-        "Pilih bahasa sumber",
+        "Bahasa teks pada gambar",
         [
             "English",
             "Jepang",
             "Korea",
             "Mandarin Sederhana",
-            "Mandarin Tradisional",
+            "Mandarin Tradisional"
+        ]
+    )
+
+with right:
+    cleaning_mode = st.selectbox(
+        "Mode pembersihan",
+        [
+            "White Fill",
+            "Inpainting"
         ],
+        format_func=lambda x: (
+            "White Fill - untuk balon putih"
+            if x == "White Fill"
+            else "Inpainting - untuk gambar kompleks"
+        )
     )
 
-    st.markdown("**Bahasa tujuan**")
-    st.info("🇮🇩 Bahasa Indonesia")
-
-    st.caption("OCR: EasyOCR")
-    st.caption("Terjemahan: MyMemory")
-
-    st.divider()
-
-    st.caption(
-        "Tidak memerlukan OpenAI API Key."
+if cleaning_mode == "White Fill":
+    st.info(
+        "White Fill akan menutup area teks dengan warna putih. "
+        "Gunakan untuk tulisan di balon dialog putih."
+    )
+else:
+    st.info(
+        "Inpainting mencoba mengisi area bekas teks "
+        "menggunakan piksel di sekitarnya."
     )
 
-# Upload gambar
-st.subheader("01 · Upload gambar manga")
 
-uploads = st.file_uploader(
-    "Pilih satu atau beberapa gambar",
+# --------------------------------------------------
+# PENGATURAN LANJUTAN
+# --------------------------------------------------
+
+with st.expander("Pengaturan lanjutan"):
+    confidence = st.slider(
+        "Sensitivitas deteksi teks",
+        min_value=0.05,
+        max_value=0.90,
+        value=0.20,
+        step=0.05,
+        help=(
+            "Nilai lebih rendah dapat mendeteksi lebih banyak teks, "
+            "tetapi bisa menghasilkan deteksi yang keliru."
+        )
+    )
+
+    mask_padding = st.slider(
+        "Perluasan area penghapusan",
+        min_value=0,
+        max_value=20,
+        value=8,
+        step=1,
+        help=(
+            "Perbesar jika masih ada pinggiran huruf yang tersisa."
+        )
+    )
+
+    inpaint_radius = st.slider(
+        "Ukuran perbaikan Inpainting",
+        min_value=1,
+        max_value=10,
+        value=4,
+        step=1,
+        help=(
+            "Pengaturan ini hanya digunakan pada mode Inpainting."
+        )
+    )
+
+    max_side = st.select_slider(
+        "Ukuran pemrosesan gambar",
+        options=[1000, 1500, 2000, 2500, 3000],
+        value=2000
+    )
+
+
+st.divider()
+
+
+# --------------------------------------------------
+# UPLOAD GAMBAR
+# --------------------------------------------------
+
+uploaded_files = st.file_uploader(
+    "Upload gambar manga atau manhwa",
     type=["png", "jpg", "jpeg", "webp"],
     accept_multiple_files=True
 )
 
-if uploads:
-    st.caption(
-        f"{len(uploads)} gambar dipilih · "
-        f"{sum(f.size for f in uploads) / 1048576:.1f} MB"
+
+# --------------------------------------------------
+# PROSES GAMBAR
+# --------------------------------------------------
+
+if uploaded_files:
+
+    st.write(
+        f"**Jumlah gambar:** {len(uploaded_files)}"
     )
 
-    cols = st.columns(min(3, len(uploads)))
+    if st.button(
+        "🧹 Mulai Hapus Teks",
+        use_container_width=True
+    ):
 
-    for i, f in enumerate(uploads[:3]):
-        with cols[i]:
-            st.image(
-                f,
-                caption=f.name,
-                use_container_width=True
-            )
+        results = []
 
-    if len(uploads) > 3:
-        st.caption(
-            f"+ {len(uploads) - 3} gambar lainnya"
-        )
-
-# Pengaturan OCR
-st.subheader("02 · Pengaturan OCR")
-
-with st.expander("Pengaturan lanjutan"):
-    confidence = st.slider(
-        "Ambang keyakinan OCR",
-        0.05,
-        0.90,
-        0.20,
-        0.05
-    )
-
-    max_side = st.select_slider(
-        "Resolusi kerja OCR",
-        [1200, 1600, 2000, 2400],
-        value=2000
-    )
-
-st.caption(
-    "Untuk pengujian awal, gunakan satu gambar terlebih dahulu."
-)
-
-st.info(
-    "Layanan MyMemory memiliki batas penggunaan gratis. "
-    "Jumlah teks yang dapat diterjemahkan per hari terbatas."
-)
-
-# Mulai penerjemahan
-if st.button(
-    "✦ Mulai terjemahkan",
-    type="primary",
-    use_container_width=True,
-    disabled=not uploads
-):
-    if len(uploads) > 20:
-        st.error("Maksimal 20 gambar per batch.")
-
-    else:
-        outputs = []
-        failures = []
-
-        bar = st.progress(0)
+        progress = st.progress(0)
         status = st.empty()
 
-        for i, f in enumerate(uploads):
-            status.info(
-                f"Memproses {i + 1}/{len(uploads)}: {f.name}"
+        for index, uploaded_file in enumerate(uploaded_files):
+
+            status.write(
+                f"Memproses {uploaded_file.name} "
+                f"({index + 1}/{len(uploaded_files)})..."
             )
 
             try:
-                data, count = translate_image(
-                    f.getvalue(),
-                    source_language,
-                    confidence,
-                    max_side
+                image_bytes = uploaded_file.getvalue()
+
+                cleaned_image, text_count = remove_text(
+                    raw_bytes=image_bytes,
+                    source_language=source_language,
+                    cleaning_mode=cleaning_mode,
+                    confidence_threshold=confidence,
+                    max_side=max_side,
+                    mask_padding=mask_padding,
+                    inpaint_radius=inpaint_radius
                 )
 
-                ext = Path(f.name).suffix.lower()
-                name = f"{Path(f.name).stem}_id{ext}"
-
-                outputs.append({
-                    "name": name,
-                    "data": data,
-                    "count": count
+                results.append({
+                    "name": uploaded_file.name,
+                    "image": cleaned_image,
+                    "count": text_count
                 })
 
-            except Exception as e:
-                failures.append((f.name, str(e)))
+            except Exception as error:
+                st.error(
+                    f"Gagal memproses {uploaded_file.name}: {error}"
+                )
 
-            bar.progress(
-                (i + 1) / len(uploads)
+            progress.progress(
+                (index + 1) / len(uploaded_files)
             )
 
-        status.empty()
+        status.success("Proses selesai!")
 
-        st.session_state["outputs"] = outputs
+        st.session_state["cleaned_results"] = results
 
-        if outputs:
-            st.success(
-                f"Berhasil memproses {len(outputs)} "
-                f"dari {len(uploads)} gambar."
+
+# --------------------------------------------------
+# HASIL GAMBAR
+# --------------------------------------------------
+
+if "cleaned_results" in st.session_state:
+
+    results = st.session_state["cleaned_results"]
+
+    if results:
+
+        st.divider()
+        st.header("Hasil Pembersihan")
+
+        for index, result in enumerate(results):
+
+            st.subheader(result["name"])
+
+            st.caption(
+                f"Area teks terdeteksi: {result['count']}"
             )
 
-        for name, err in failures:
-            with st.expander(f"Gagal: {name}"):
-                st.code(err)
+            original_file = next(
+                (
+                    file
+                    for file in uploaded_files
+                    if file.name == result["name"]
+                ),
+                None
+            )
 
-# Hasil terjemahan
-outputs = st.session_state.get("outputs", [])
+            if original_file is not None:
 
-if outputs:
-    st.divider()
-    st.subheader("03 · Hasil terjemahan")
+                original_image = Image.open(
+                    io.BytesIO(original_file.getvalue())
+                ).convert("RGB")
 
-    st.caption(
-        "Periksa hasil terjemahan. "
-        "Penempatan teks dan penghapusan teks lama "
-        "belum tentu sempurna."
-    )
+                before, after = st.columns(2)
 
-    for i, item in enumerate(outputs):
-        with st.expander(
-            f"📄 {item['name']} · {item['count']} area teks",
-            expanded=i == 0
-        ):
-            st.image(
-                item["data"],
-                use_container_width=True
+                with before:
+                    st.caption("Sebelum")
+                    st.image(
+                        original_image,
+                        use_container_width=True
+                    )
+
+                with after:
+                    st.caption("Sesudah")
+                    st.image(
+                        result["image"],
+                        use_container_width=True
+                    )
+
+            else:
+                st.image(
+                    result["image"],
+                    use_container_width=True
+                )
+
+            output_buffer = io.BytesIO()
+
+            result["image"].save(
+                output_buffer,
+                format="PNG"
             )
 
             st.download_button(
-                "⬇️ Download gambar",
-                item["data"],
-                file_name=item["name"],
-                key=f"one_{i}",
+                label="⬇️ Download gambar bersih",
+                data=output_buffer.getvalue(),
+                file_name=f"cleaned_{result['name'].rsplit('.', 1)[0]}.png",
+                mime="image/png",
+                key=f"download_{index}",
                 use_container_width=True
             )
 
-    # Buat ZIP
-    buff = io.BytesIO()
+            st.divider()
 
-    with zipfile.ZipFile(
-        buff,
-        "w",
-        zipfile.ZIP_DEFLATED
-    ) as z:
-        for item in outputs:
-            z.writestr(
-                item["name"],
-                item["data"]
-            )
+        # ------------------------------------------
+        # DOWNLOAD SEMUA HASIL DALAM ZIP
+        # ------------------------------------------
 
-    st.download_button(
-        "📦 Download semua hasil (ZIP)",
-        buff.getvalue(),
-        "manga-translator-id.zip",
-        "application/zip",
-        type="primary",
-        use_container_width=True
-    )
+        zip_buffer = io.BytesIO()
+
+        with zipfile.ZipFile(
+            zip_buffer,
+            "w",
+            zipfile.ZIP_DEFLATED
+        ) as zip_file:
+
+            for result in results:
+
+                image_buffer = io.BytesIO()
+
+                result["image"].save(
+                    image_buffer,
+                    format="PNG"
+                )
+
+                filename = (
+                    f"cleaned_{result['name'].rsplit('.', 1)[0]}.png"
+                )
+
+                zip_file.writestr(
+                    filename,
+                    image_buffer.getvalue()
+                )
+
+        st.download_button(
+            label="📦 Download Semua Gambar (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="manga_cleaned_images.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+
+
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 
 st.divider()
 
 st.caption(
-    "Manga Translator ID · Versi MyMemory · "
-    "Gunakan hanya gambar yang Anda berhak proses."
+    "Manga Text Remover | OCR: EasyOCR | "
+    "Image Cleaning: OpenCV"
 )
