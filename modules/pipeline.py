@@ -4,10 +4,20 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 import streamlit as st
 
 @st.cache_resource
-def reader():
-    # Model EasyOCR diunduh saat pemakaian pertama.
-    return easyocr.Reader(["en","ja","ko","ch_sim","ch_tra"], gpu=False, verbose=False)
-
+def reader(source_language):
+    languages = {
+        "English": ["en"],
+        "Jepang": ["ja", "en"],
+        "Korea": ["ko", "en"],
+        "Mandarin Sederhana": ["ch_sim", "en"],
+        "Mandarin Tradisional": ["ch_tra", "en"],
+    }
+    return easyocr.Reader(
+        languages[source_language],
+        gpu=False,
+        verbose=False
+    )
+    
 def translate_texts(texts, key, model):
     if not texts: return []
     prompt=("Terjemahkan teks manga berikut ke Bahasa Indonesia yang alami, ringkas, dan sesuai konteks. "
@@ -70,13 +80,13 @@ def render(image,detections,translations):
     else: canvas.save(out,"PNG",optimize=True)
     return out.getvalue()
 
-def translate_image(raw_bytes,api_key,model,confidence_threshold=.2,max_side=2000):
+def translate_image(raw_bytes,api_key,model,source_language,confidence_threshold=.2,max_side=2000):
     try:
         image=ImageOps.exif_transpose(Image.open(io.BytesIO(raw_bytes))); image.load()
     except Exception as e: raise ValueError(f"Gambar tidak valid: {e}")
     if image.width*image.height>40_000_000: raise ValueError("Resolusi terlalu besar (maksimal 40 megapiksel).")
     work=image.copy(); work.thumbnail((max_side,max_side))
-    found=reader().readtext(np.array(work),detail=1,paragraph=False)
+    found=reader(source_language).readtext(np.array(work),detail=1,paragraph=False)
     sx,sy=image.width/work.width,image.height/work.height
     detections=[]; texts=[]
     for poly,text,conf in found:
