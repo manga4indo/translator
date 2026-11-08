@@ -1,334 +1,241 @@
 
 import io
-import requests
+
 import cv2
 import easyocr
 import numpy as np
-import time
-
-from PIL import Image, ImageDraw, ImageFont, ImageOps
 import streamlit as st
+from PIL import Image
 
 
-# OCR: memilih bahasa sesuai pilihan pengguna
+# Bahasa OCR yang didukung
+LANGUAGES = {
+    "English": ["en"],
+    "Jepang": ["ja", "en"],
+    "Korea": ["ko", "en"],
+    "Mandarin Sederhana": ["ch_sim", "en"],
+    "Mandarin Tradisional": ["ch_tra", "en"],
+}
+
+
 @st.cache_resource
-def reader(source_language):
-    languages = {
-        "English": ["en"],
-        "Jepang": ["ja", "en"],
-        "Korea": ["ko", "en"],
-        "Mandarin Sederhana": ["ch_sim", "en"],
-        "Mandarin Tradisional": ["ch_tra", "en"],
-    }
+def get_reader(source_language):
+    """
+    Memuat OCR reader dan menyimpannya di cache
+    agar tidak perlu mengunduh model setiap gambar.
+    """
+    if source_language not in LANGUAGES:
+        raise ValueError("Bahasa sumber tidak didukung.")
 
     return easyocr.Reader(
-        languages[source_language],
+        LANGUAGES[source_language],
         gpu=False,
         verbose=False
     )
 
 
-# Kode bahasa untuk MyMemory
-SOURCE_CODES = {
-    "English": "en",
-    "Jepang": "ja",
-    "Korea": "ko",
-    "Mandarin Sederhana": "zh-CN",
-    "Mandarin Tradisional": "zh-TW",
-}
+def resize_image(image, max_side=2000):
+    """
+    Mengecilkan gambar yang terlalu besar agar
+    pemrosesan lebih ringan.
+    """
+    height, width = image.shape[:2]
 
+    largest_side = max(height, width)
 
-# Memecah teks agar tidak melebihi batas 500 byte
-def split_text(text, max_bytes=450):
-    parts = []
-    current = ""
+    if largest_side <= max_side:
+        return image, 1.0
 
-    for char in text:
-        if len((current + char).encode("utf-8")) > max_bytes:
-            if current:
-                parts.append(current)
-            current = char
-        else:
-            current += char
+    scale = max_side / largest_side
 
-    if current:
-        parts.append(current)
+    new_width = int(width * scale)
+    new_height = int(height * scale)
 
-    return parts
-
-
-# Terjemahan gratis menggunakan MyMemory
-def translate_one(text, source_code):
-    url = "https://api.mymemory.translated.net/get"
-
-    response = requests.get(
-        url,
-        params={
-            "q": text,
-            "langpair": f"{source_code}|id",
-        },
-        timeout=45
+    resized = cv2.resize(
+        image,
+        (new_width, new_height),
+        interpolation=cv2.INTER_AREA
     )
 
-    response.raise_for_status()
-    result = response.json()
+    return resized, scale
 
-    if result.get("responseStatus") != 200:
-        detail = result.get("responseDetails", "Terjemahan gagal.")
-        raise RuntimeError(str(detail))
 
-    translated = result.get("responseData", {}).get(
-        "translatedText", ""
+def create_text_mask(
+    image_shape,
+    detections,
+    mask_padding=8
+):
+    """
+    Membuat mask berdasarkan area teks yang ditemukan OCR.
+    Mask diperlebar agar sisa pinggiran huruf ikut terhapus.
+    """
+    height, width = image_shape[:2]
+
+    mask = np.zeros(
+        (height, width),
+        dtype=np.uint8
     )
 
-    if not translated:
-        raise RuntimeError("Layanan tidak memberikan hasil terjemahan.")
+    for detection in detections:
+        if len(detection) < 3:
+            continue
 
-    return translated
+        bbox, text, confidence = detection
 
+        if not text or confidence < 0.20:
+            continue
 
-def translate_texts(texts, source_language):
-    source_code = SOURCE_CODES[source_language]
-    translations = []
+        polygon = np.array(
+            bbox,
+            dtype=np.int32
+        )
 
-    for text in texts:
-        parts = split_text(text)
-        translated_parts = []
+        polygon[:, 0] = np.clip(
+            polygon[:, 0], 0, width - 1
+        )
 
-        for part in parts:
-            translated_parts.append(
-                translate_one(part, source_code)
-            )
-            time.sleep(0.2)
+        polygon[:, 1] = np.clip(
+            polygon[:, 1], 0, height - 1
+        )
 
-        translations.append("".join(translated_parts))
+        cv2.fillPoly(
+            mask,
+            [polygon],
+            255
+        )
 
-    return translations
+    if mask_padding > 0 and np.any(mask):
+        kernel_size = mask_padding * 2 + 1
 
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (kernel_size, kernel_size)
+        )
 
-# Font bawaan
-def font(size):
-    paths = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    ]
-
-    for path in paths:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            pass
-
-    return ImageFont.load_default()
-
-
-# Membungkus teks agar muat dalam kotak
-def wrap(draw, text, selected_font, max_width):
-    lines = []
-    current = ""
-
-    for char in text:
-        test = current + char
-
-        if (
-            current
-            and draw.textbbox(
-                (0, 0), test, font=selected_font
-            )[2] > max_width
-        ):
-            lines.append(current)
-            current = char
-        else:
-            current = test
-
-    if current:
-        lines.append(current)
-
-    return lines or [""]
-
-
-# Menghapus teks lama dan menggambar terjemahan
-def render(image, detections, translations):
-    rgb = np.array(image.convert("RGB"))
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-    mask = np.zeros(bgr.shape[:2], np.uint8)
-    boxes = []
-
-    for polygon in detections:
-        points = np.asarray(polygon, np.int32)
-        cv2.fillPoly(mask, [points], 255)
-
-        xs = points[:, 0]
-        ys = points[:, 1]
-
-        boxes.append((
-            max(0, int(xs.min())),
-            max(0, int(ys.min())),
-            min(image.width, int(xs.max())),
-            min(image.height, int(ys.max()))
-        ))
-
-    if np.any(mask):
         mask = cv2.dilate(
             mask,
-            np.ones((3, 3), np.uint8),
+            kernel,
             iterations=1
         )
 
-        bgr = cv2.inpaint(
-            bgr,
-            mask,
-            4,
-            cv2.INPAINT_TELEA
-        )
+    return mask
 
-    canvas = Image.fromarray(
-        cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+def clean_with_white_fill(image, mask):
+    """
+    Mengisi area teks dengan warna putih.
+    Cocok untuk balon dialog berlatar putih.
+    """
+    result = image.copy()
+
+    result[mask > 0] = (255, 255, 255)
+
+    return result
+
+
+def clean_with_inpainting(image, mask, radius=4):
+    """
+    Menghapus area teks dan memperkirakan
+    isi area tersebut dari piksel di sekitarnya.
+    """
+    result = cv2.inpaint(
+        image,
+        mask,
+        radius,
+        cv2.INPAINT_TELEA
     )
 
-    draw = ImageDraw.Draw(canvas)
-
-    for (x1, y1, x2, y2), text in zip(boxes, translations):
-        width = x2 - x1
-        height = y2 - y1
-
-        if not text.strip() or width < 3 or height < 3:
-            continue
-
-        padding = max(2, int(min(width, height) * 0.06))
-        chosen_font = font(8)
-        lines = [text]
-
-        for size in range(max(9, int(height * 0.75)), 7, -1):
-            selected_font = font(size)
-
-            candidate = wrap(
-                draw,
-                text,
-                selected_font,
-                max(8, width - 2 * padding)
-            )
-
-            line_height = max(
-                draw.textbbox(
-                    (0, 0), line, font=selected_font
-                )[3]
-                for line in candidate
-            ) + 2
-
-            if len(candidate) * line_height <= max(
-                8, height - 2 * padding
-            ):
-                chosen_font = selected_font
-                lines = candidate
-                break
-
-        line_height = max(
-            draw.textbbox(
-                (0, 0), line, font=chosen_font
-            )[3]
-            for line in lines
-        ) + 2
-
-        y = y1 + max(
-            padding,
-            (height - len(lines) * line_height) // 2
-        )
-
-        for line in lines:
-            box = draw.textbbox(
-                (0, 0), line, font=chosen_font
-            )
-
-            x = x1 + max(
-                padding,
-                (width - (box[2] - box[0])) // 2
-            )
-
-            draw.text(
-                (x, y),
-                line,
-                font=chosen_font,
-                fill=(20, 20, 20)
-            )
-
-            y += line_height
-
-    output = io.BytesIO()
-    image_format = (image.format or "PNG").upper()
-
-    if image_format in ("JPG", "JPEG"):
-        canvas.save(output, "JPEG", quality=95, optimize=True)
-    elif image_format == "WEBP":
-        canvas.save(output, "WEBP", quality=95, method=6)
-    else:
-        canvas.save(output, "PNG", optimize=True)
-
-    return output.getvalue()
+    return result
 
 
-# Fungsi utama penerjemahan gambar
-def translate_image(
+def remove_text(
     raw_bytes,
     source_language,
-    confidence_threshold=0.2,
-    max_side=2000
+    cleaning_mode,
+    confidence_threshold=0.20,
+    max_side=2000,
+    mask_padding=8,
+    inpaint_radius=4
 ):
-    try:
-        image = ImageOps.exif_transpose(
-            Image.open(io.BytesIO(raw_bytes))
-        )
-        image.load()
+    """
+    Fungsi utama:
+    1. Membaca gambar.
+    2. Mendeteksi teks menggunakan EasyOCR.
+    3. Membuat mask.
+    4. Membersihkan teks menggunakan mode pilihan.
+    5. Mengembalikan gambar hasil.
+    """
 
-    except Exception as error:
-        raise ValueError(f"Gambar tidak valid: {error}")
+    # Buka gambar
+    pil_image = Image.open(
+        io.BytesIO(raw_bytes)
+    ).convert("RGB")
 
-    if image.width * image.height > 40_000_000:
-        raise ValueError(
-            "Resolusi terlalu besar (maksimal 40 megapiksel)."
-        )
+    original_image = np.array(pil_image)
 
-    work = image.copy()
-    work.thumbnail((max_side, max_side))
+    original_height, original_width = original_image.shape[:2]
 
-    found = reader(source_language).readtext(
-        np.array(work),
+    # Perkecil gambar jika terlalu besar
+    working_image, scale = resize_image(
+        original_image,
+        max_side=max_side
+    )
+
+    # Muat OCR
+    reader = get_reader(source_language)
+
+    # Deteksi teks
+    detections = reader.readtext(
+        working_image,
         detail=1,
         paragraph=False
     )
 
-    scale_x = image.width / work.width
-    scale_y = image.height / work.height
+    # Filter berdasarkan tingkat keyakinan OCR
+    filtered_detections = [
+        item
+        for item in detections
+        if len(item) >= 3
+        and item[1]
+        and item[2] >= confidence_threshold
+    ]
 
-    detections = []
-    texts = []
-
-    for polygon, text, confidence in found:
-        text = str(text).strip()
-
-        if not text or float(confidence) < confidence_threshold:
-            continue
-
-        detections.append([
-            [int(x * scale_x), int(y * scale_y)]
-            for x, y in polygon
-        ])
-
-        texts.append(text)
-
-    if not texts:
-        output = io.BytesIO()
-        image.save(output, format=image.format or "PNG")
-        return output.getvalue(), 0
-
-    translated = translate_texts(
-        texts,
-        source_language
+    # Buat mask
+    mask = create_text_mask(
+        working_image.shape,
+        filtered_detections,
+        mask_padding=mask_padding
     )
 
-    return render(
-        image,
-        detections,
-        translated
-    ), len(texts)
+    # Bersihkan gambar
+    if cleaning_mode == "White Fill":
+        cleaned = clean_with_white_fill(
+            working_image,
+            mask
+        )
+
+    elif cleaning_mode == "Inpainting":
+        cleaned = clean_with_inpainting(
+            working_image,
+            mask,
+            radius=inpaint_radius
+        )
+
+    else:
+        raise ValueError("Mode pembersihan tidak dikenal.")
+
+    # Kembalikan ke ukuran asli jika sebelumnya diperkecil
+    if scale != 1.0:
+        cleaned = cv2.resize(
+            cleaned,
+            (original_width, original_height),
+            interpolation=cv2.INTER_CUBIC
+        )
+
+    # Hitung jumlah area teks yang terdeteksi
+    text_count = len(filtered_detections)
+
+    # Konversi ke PIL
+    result_image = Image.fromarray(cleaned)
+
+    return result_image, text_count
