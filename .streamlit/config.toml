@@ -1,7 +1,7 @@
-
 [server]
 maxUploadSize = 20
 headless = true
+fileWatcherType = "none"
 
 [theme]
 base = "dark"
