@@ -4,7 +4,6 @@ import zipfile
 from pathlib import Path
 
 import streamlit as st
-from PIL import Image
 from modules.pipeline import translate_image
 
 st.set_page_config(
@@ -74,7 +73,15 @@ with st.sidebar:
 
     st.markdown("**Bahasa tujuan**")
     st.info("🇮🇩 Bahasa Indonesia")
-    st.caption("OCR: EasyOCR · Terjemahan: OpenAI API")
+
+    st.caption("OCR: EasyOCR")
+    st.caption("Terjemahan: MyMemory")
+
+    st.divider()
+
+    st.caption(
+        "Tidak memerlukan OpenAI API Key."
+    )
 
 # Upload gambar
 st.subheader("01 · Upload gambar manga")
@@ -95,35 +102,27 @@ if uploads:
 
     for i, f in enumerate(uploads[:3]):
         with cols[i]:
-            st.image(f, caption=f.name, use_container_width=True)
+            st.image(
+                f,
+                caption=f.name,
+                use_container_width=True
+            )
 
     if len(uploads) > 3:
-        st.caption(f"+ {len(uploads) - 3} gambar lainnya")
+        st.caption(
+            f"+ {len(uploads) - 3} gambar lainnya"
+        )
 
-# Pengaturan terjemahan
-st.subheader("02 · Pengaturan terjemahan")
-
-try:
-    saved_key = st.secrets.get("OPENAI_API_KEY", "")
-except Exception:
-    saved_key = ""
-
-api_key = st.text_input(
-    "OpenAI API Key",
-    value=saved_key,
-    type="password",
-    help="Atur sebagai OPENAI_API_KEY di Streamlit Secrets untuk deployment."
-)
-
-model = st.text_input("Model terjemahan", "gpt-4o-mini")
+# Pengaturan OCR
+st.subheader("02 · Pengaturan OCR")
 
 with st.expander("Pengaturan lanjutan"):
     confidence = st.slider(
         "Ambang keyakinan OCR",
-        .05,
-        .90,
-        .20,
-        .05
+        0.05,
+        0.90,
+        0.20,
+        0.05
     )
 
     max_side = st.select_slider(
@@ -133,24 +132,22 @@ with st.expander("Pengaturan lanjutan"):
     )
 
 st.caption(
-    "Versi awal: maksimal 20 gambar per batch. "
-    "Mulai dengan 1 gambar untuk menguji performa."
+    "Untuk pengujian awal, gunakan satu gambar terlebih dahulu."
 )
 
-# Mulai proses penerjemahan
+st.info(
+    "Layanan MyMemory memiliki batas penggunaan gratis. "
+    "Jumlah teks yang dapat diterjemahkan per hari terbatas."
+)
+
+# Mulai penerjemahan
 if st.button(
     "✦ Mulai terjemahkan",
     type="primary",
     use_container_width=True,
     disabled=not uploads
 ):
-    if not api_key.strip():
-        st.error(
-            "Masukkan API key atau atur OPENAI_API_KEY "
-            "di Streamlit Secrets."
-        )
-
-    elif len(uploads) > 20:
+    if len(uploads) > 20:
         st.error("Maksimal 20 gambar per batch.")
 
     else:
@@ -168,8 +165,6 @@ if st.button(
             try:
                 data, count = translate_image(
                     f.getvalue(),
-                    api_key.strip(),
-                    model.strip() or "gpt-4o-mini",
                     source_language,
                     confidence,
                     max_side
@@ -187,7 +182,9 @@ if st.button(
             except Exception as e:
                 failures.append((f.name, str(e)))
 
-            bar.progress((i + 1) / len(uploads))
+            bar.progress(
+                (i + 1) / len(uploads)
+            )
 
         status.empty()
 
@@ -203,7 +200,7 @@ if st.button(
             with st.expander(f"Gagal: {name}"):
                 st.code(err)
 
-# Menampilkan hasil
+# Hasil terjemahan
 outputs = st.session_state.get("outputs", [])
 
 if outputs:
@@ -211,8 +208,9 @@ if outputs:
     st.subheader("03 · Hasil terjemahan")
 
     st.caption(
-        "Periksa hasil sebelum digunakan. "
-        "Inpainting dan penempatan teks otomatis tidak selalu sempurna."
+        "Periksa hasil terjemahan. "
+        "Penempatan teks dan penghapusan teks lama "
+        "belum tentu sempurna."
     )
 
     for i, item in enumerate(outputs):
@@ -220,7 +218,10 @@ if outputs:
             f"📄 {item['name']} · {item['count']} area teks",
             expanded=i == 0
         ):
-            st.image(item["data"], use_container_width=True)
+            st.image(
+                item["data"],
+                use_container_width=True
+            )
 
             st.download_button(
                 "⬇️ Download gambar",
@@ -230,6 +231,7 @@ if outputs:
                 use_container_width=True
             )
 
+    # Buat ZIP
     buff = io.BytesIO()
 
     with zipfile.ZipFile(
@@ -238,7 +240,10 @@ if outputs:
         zipfile.ZIP_DEFLATED
     ) as z:
         for item in outputs:
-            z.writestr(item["name"], item["data"])
+            z.writestr(
+                item["name"],
+                item["data"]
+            )
 
     st.download_button(
         "📦 Download semua hasil (ZIP)",
@@ -252,6 +257,6 @@ if outputs:
 st.divider()
 
 st.caption(
-    "Manga Translator ID · Versi awal · "
+    "Manga Translator ID · Versi MyMemory · "
     "Gunakan hanya gambar yang Anda berhak proses."
 )
